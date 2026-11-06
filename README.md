@@ -23,7 +23,7 @@ npm start   # http://localhost:3000
 ```
 
 ## Deploy บน Railway
-- ใช้ Node.js (Nixpacks ตรวจเจออัตโนมัติ) คำสั่งเริ่ม `npm start` อ่านพอร์ตจาก `PORT`
+- ใช้ Node.js 24.22.1 (ล็อกไว้ใน `engines` ของ package.json, Railway ตรวจเจออัตโนมัติ) คำสั่งเริ่ม `npm start` อ่านพอร์ตจาก `PORT`
 - Health check: `/healthz`
 - ไม่ต้องตั้งตัวแปรเพิ่ม ไม่มีฐานข้อมูล
 
