@@ -86,6 +86,12 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .player .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .player .name { font-weight: 700; overflow-wrap: anywhere; }
 .tag { font-size: .78rem; color: var(--muted); }
+.guess-form { margin-bottom: 12px; padding: 12px 14px; background: var(--card); border: 1px solid var(--accent); border-radius: 14px; }
+.guess-form .row input { margin-bottom: 0; }
+.guess { margin-top: 6px; font-size: .95rem; overflow-wrap: anywhere; }
+.guess b { color: var(--accent); }
+button.judge { min-height: 36px; padding: 6px 12px; background: var(--good); color: #fff; border-color: var(--good); }
+button.judge.undo { background: var(--card); color: var(--muted); border-color: var(--line); }
 .right { display: flex; align-items: center; gap: 8px; }
 .score { font-weight: 800; white-space: nowrap; }
 .gain { font-weight: 700; color: var(--good); }

@@ -13,6 +13,8 @@ const MIN_PLAYERS = 2;
 const MAX_CUSTOM_WORDS = 100;
 const TIME_OPTIONS = [3, 5, 7]; // นาที ให้หัวห้องเลือก
 const DEFAULT_TIME = 5;
+const LATE_POINTS = 1; // ทายถูกในช่วงทายสุดท้ายหลังหมดเวลา ได้คะแนนคงที่
+const MAX_GUESS_LEN = 30;
 const HOST_GRACE_MS = 20 * 1000; // รอให้หัวห้องรีเฟรช/กลับมาก่อนโอนสิทธิ์
 const ROOM_IDLE_MS = 10 * 60 * 1000; // ห้องที่ไม่มีใครออนไลน์จะถูกลบ
 const RATE_WINDOW_MS = 5000;
@@ -90,7 +92,7 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
       timeOptions: TIME_OPTIONS,
       // เวลาที่เหลือคิดจากนาฬิกาเซิร์ฟเวอร์ ส่งเป็นมิลลิวินาทีที่เหลือ (ไม่พึ่งนาฬิกาเครื่องผู้เล่น)
       remainingMs: room.phase === 'playing' && room.endsAt ? Math.max(0, room.endsAt - Date.now()) : null,
-      endReason: room.phase === 'revealed' ? room.endReason : null,
+      endReason: room.phase === 'revealed' || room.phase === 'final' ? room.endReason : null,
       customCount: room.custom.length,
       customWords: isHost ? room.custom : undefined,
       players: room.players.map((p) => {
@@ -106,6 +108,8 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
           word,
           score: p.score,
           roundPoints: p.done ? p.roundPoints : 0,
+          late: p.late,
+          guess: room.phase === 'final' || revealed ? p.guess : null,
         };
       }),
     };
@@ -150,6 +154,7 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
       clearTimeout(room.hostTimer);
       room.hostId = room.players.find((p) => p.connected)?.id || room.players[0].id;
     }
+    if (room.phase === 'playing' || room.phase === 'final') recalc(room);
     maybeAutoReveal(room);
     broadcast(room);
     scheduleIdleCleanup(room);
@@ -161,7 +166,7 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
     room.endsAt = Date.now() + ms;
     room.roundTimer = setTimeout(() => {
       if (room.phase !== 'playing') return;
-      endRound(room, 'timeout');
+      enterFinal(room, 'timeout');
       broadcast(room);
     }, ms);
     room.roundTimer.unref?.();
@@ -175,8 +180,34 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
     room.endReason = reason;
   }
 
+  // ช่วงทายสุดท้าย: คนที่ยังไม่ถูกตัดสินว่าทายถูกพิมพ์ทายคำของตัวเอง หัวห้องเป็นคนตัดสิน
+  function enterFinal(room, reason) {
+    clearTimeout(room.roundTimer);
+    room.roundTimer = null;
+    room.endsAt = null;
+    if (room.players.length > 0 && room.players.every((p) => p.done)) {
+      endRound(room, 'all-done');
+      return;
+    }
+    room.phase = 'final';
+    room.endReason = reason;
+  }
+
+  // คะแนนคำนวณใหม่จากลำดับที่หัวห้องกด ทุกครั้ง (กดยกเลิก/คนออกกลางรอบ อันดับจึงถูกต้องเสมอ)
+  function recalc(room) {
+    room.order = room.order.filter((id) => room.players.some((p) => p.id === id && p.done && !p.late));
+    for (const p of room.players) {
+      let pts = 0;
+      if (p.done && p.late) pts = LATE_POINTS;
+      else if (p.done) pts = Math.max(1, room.roundSize - room.order.indexOf(p.id));
+      p.roundPoints = pts;
+      p.score = p.baseScore + pts;
+    }
+  }
+
   function maybeAutoReveal(room) {
-    if (room.phase === 'playing' && room.players.length > 0 && room.players.every((p) => p.done)) {
+    if ((room.phase === 'playing' || room.phase === 'final') &&
+        room.players.length > 0 && room.players.every((p) => p.done)) {
       endRound(room, 'all-done');
     }
   }
@@ -209,7 +240,10 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
       word: null,
       done: false,
       score: 0,
+      baseScore: 0,
       roundPoints: 0,
+      late: false,
+      guess: null,
     };
   }
 
@@ -224,7 +258,7 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
       players: [],
       custom: [],
       round: 0,
-      finishCount: 0,
+      order: [],
       roundSize: 0,
       timeLimit: DEFAULT_TIME,
       endsAt: null,
@@ -277,10 +311,13 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
     room.players.forEach((p, i) => {
       p.word = picked[i];
       p.done = false;
+      p.late = false;
+      p.guess = null;
+      p.baseScore = p.score;
       p.roundPoints = 0;
     });
     room.round += 1;
-    room.finishCount = 0;
+    room.order = [];
     room.roundSize = room.players.length;
     room.phase = 'playing';
     room.endReason = null;
@@ -288,21 +325,51 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
     broadcast(room);
   }
 
-  function handleDone(room, player) {
-    if (room.phase !== 'playing' || player.done) return;
-    player.done = true;
-    // คะแนนตามลำดับที่ทายถูก: คนแรกได้เท่าจำนวนผู้เล่นตอนเริ่มรอบ ลดลงทีละ 1 ต่ำสุด 1
-    room.finishCount += 1;
-    player.roundPoints = Math.max(1, room.roundSize - room.finishCount + 1);
-    player.score += player.roundPoints;
+  // หัวห้องเป็นคนตัดสินว่าใครทายถูก (กดที่คนนั้น = คำนั้นเป็นของคนนั้น) ผู้เล่นกดเองไม่ได้
+  function handleMark(room, player, msg) {
+    if (player.id !== room.hostId) return fail(player.ws, 'เฉพาะหัวห้องเท่านั้น');
+    if (room.phase !== 'playing' && room.phase !== 'final') return undefined;
+    const target = room.players.find((p) => p.id === msg.id);
+    if (!target || typeof msg.correct !== 'boolean') return undefined;
+    if (msg.correct && !target.done) {
+      target.done = true;
+      target.late = room.phase === 'final';
+      if (!target.late) room.order.push(target.id);
+    } else if (!msg.correct && target.done) {
+      target.done = false;
+      target.late = false;
+    } else {
+      return undefined;
+    }
+    recalc(room);
     maybeAutoReveal(room);
+    broadcast(room);
+    return undefined;
+  }
+
+  // ช่วงทายสุดท้าย: ทายคำของตัวเอง (ส่งซ้ำเพื่อแก้ได้จนกว่าจะเฉลย)
+  function handleGuess(room, player, msg) {
+    if (room.phase !== 'final') return fail(player.ws, 'ทายสุดท้ายได้เมื่อหมดเวลาเท่านั้น');
+    if (player.done) return undefined;
+    const text = cleanText(msg.text, MAX_GUESS_LEN);
+    if (!text) return fail(player.ws, 'พิมพ์คำทายก่อน');
+    player.guess = text;
+    broadcast(room);
+    return undefined;
+  }
+
+  // หัวห้องจบรอบเอง -> เข้าช่วงทายสุดท้าย (ถ้าทุกคนถูกตัดสินแล้วก็เฉลยเลย)
+  function handleFinish(room, player) {
+    if (player.id !== room.hostId) return fail(player.ws, 'เฉพาะหัวห้องเท่านั้น');
+    if (room.phase !== 'playing') return;
+    enterFinal(room, 'host');
     broadcast(room);
   }
 
   function handleReveal(room, player) {
     if (player.id !== room.hostId) return fail(player.ws, 'เฉพาะหัวห้องเท่านั้น');
-    if (room.phase !== 'playing') return;
-    endRound(room, 'host');
+    if (room.phase !== 'playing' && room.phase !== 'final') return;
+    endRound(room, room.phase === 'final' ? room.endReason : 'host');
     broadcast(room);
   }
 
@@ -310,7 +377,7 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
     if (player.id !== room.hostId) return fail(player.ws, 'เฉพาะหัวห้องเท่านั้น');
     if (room.phase === 'lobby') return;
     // ยกเลิกรอบกลางคัน: คืนคะแนนของรอบที่ไม่จบ
-    if (room.phase === 'playing') room.players.forEach((p) => { p.score -= p.roundPoints; });
+    if (room.phase === 'playing' || room.phase === 'final') room.players.forEach((p) => { p.score = p.baseScore; });
     clearTimeout(room.roundTimer);
     room.roundTimer = null;
     room.endsAt = null;
@@ -319,8 +386,11 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
     room.players.forEach((p) => {
       p.word = null;
       p.done = false;
+      p.late = false;
+      p.guess = null;
       p.roundPoints = 0;
     });
+    room.order = [];
     broadcast(room);
   }
 
@@ -329,6 +399,7 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
     if (room.phase !== 'lobby') return fail(player.ws, 'รีเซ็ตคะแนนได้เฉพาะก่อนเริ่มเกม');
     room.players.forEach((p) => {
       p.score = 0;
+      p.baseScore = 0;
       p.roundPoints = 0;
     });
     room.round = 0;
@@ -395,7 +466,9 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
       const { room, player } = ws.ctx;
       switch (msg.t) {
         case 'start': return handleStart(room, player);
-        case 'done': return handleDone(room, player);
+        case 'mark': return handleMark(room, player, msg);
+        case 'guess': return handleGuess(room, player, msg);
+        case 'finish': return handleFinish(room, player);
         case 'reveal': return handleReveal(room, player);
         case 'again': return handleAgain(room, player);
         case 'words': return handleWords(room, player, msg);

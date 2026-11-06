@@ -103,9 +103,19 @@
       return isHost ? 'พร้อมแล้ว กด "เริ่มเกม" ได้เลย' : 'รอหัวห้องเริ่มเกม...';
     }
     if (s.phase === 'playing') {
+      if (isHost) return 'ฟังเพื่อนทาย แล้วกด "✓ ทายถูก" ที่การ์ดของคนที่ทายคำตัวเองถูก (ตามลำดับก่อน-หลัง)';
       return me.done
-        ? 'คุณทายถูกแล้ว! รอคนอื่นทายต่อ'
-        : 'ถามคำถามเพื่อทายคำบนหัวคุณ (พูดคุยกันนอกเกม) ห้ามมองคำของตัวเอง!';
+        ? 'หัวห้องตัดสินว่าคุณทายถูกแล้ว! รอคนอื่นทายต่อ'
+        : 'ถามคำถามเพื่อทายคำบนหัวคุณ (พูดคุยกันนอกเกม) แล้วรอหัวห้องตัดสินว่าทายถูก';
+    }
+    if (s.phase === 'final') {
+      const why = s.endReason === 'timeout' ? 'หมดเวลา!' : 'หัวห้องจบรอบแล้ว!';
+      if (isHost) {
+        return `${why} ช่วงทายสุดท้าย: ดูคำทายของแต่ละคน กด "✓ ทายถูก" ถ้าถูก (ได้ 1 คะแนน) แล้วกดเฉลย`;
+      }
+      return me.done
+        ? `${why} คุณทายถูกแล้ว รอคนอื่นทายสุดท้าย`
+        : `${why} ช่วงทายสุดท้าย: พิมพ์ทายคำของตัวเอง แล้วรอหัวห้องตัดสิน`;
     }
     if (s.endReason === 'timeout') return 'หมดเวลา! เฉลยคำของทุกคนแล้ว';
     if (s.endReason === 'all-done') return 'ทุกคนทายถูกแล้ว! ดูคำของทุกคนด้านล่าง';
@@ -184,6 +194,9 @@
     } else if (s.phase === 'playing') {
       timer.classList.remove('small');
       tick();
+    } else if (s.phase === 'final') {
+      timer.classList.add('small');
+      timer.textContent = s.endReason === 'timeout' ? '⏱ หมดเวลา · ช่วงทายสุดท้าย' : '⏱ ช่วงทายสุดท้าย';
     }
     const seg = $('time-seg');
     seg.textContent = '';
@@ -206,12 +219,19 @@
       if (p.id === s.hostId) tags.push('👑 หัวห้อง');
       if (p.id === s.you) tags.push('คุณ');
       if (!p.connected) tags.push('หลุดการเชื่อมต่อ');
+      if (p.done) tags.push(p.late ? '✓ ทายถูก (ทายสุดท้าย)' : '✓ ทายถูก');
       if (tags.length) left.append(el('div', 'tag', tags.join(' · ')));
       top.append(left);
       const right = el('div', 'right');
       if (s.round > 0) {
         if (s.phase !== 'lobby' && p.roundPoints > 0) right.append(el('span', 'gain', `+${p.roundPoints}`));
         right.append(el('span', 'score', `⭐ ${p.score}`));
+      }
+      if (isHost && (s.phase === 'playing' || s.phase === 'final')) {
+        // หัวห้องเป็นคนตัดสิน: กดที่การ์ด = คำนั้นเป็นของคนนี้และเขาทายถูก (กดซ้ำเพื่อยกเลิก)
+        right.append(button(p.done ? 'ยกเลิก' : '✓ ทายถูก', () => {
+          send({ t: 'mark', id: p.id, correct: !p.done });
+        }, p.done ? 'judge undo' : 'judge'));
       }
       if (isHost && p.id !== s.you && s.phase === 'lobby') {
         right.append(button('เชิญออก', () => {
@@ -224,6 +244,12 @@
       if (s.phase !== 'lobby') {
         if (p.word === null) li.append(el('div', 'word hidden', '???'));
         else li.append(el('div', `word${p.id === s.you ? ' done' : ''}`, p.word));
+        if (p.guess) {
+          const g = el('div', 'guess');
+          g.append(el('b', '', 'คำทาย: '));
+          g.append(document.createTextNode(p.guess));
+          li.append(g);
+        }
       }
       list.append(li);
     }
@@ -243,18 +269,25 @@
         }));
       }
     }
-    if (s.phase === 'playing') {
-      if (!me.done) {
-        actions.append(button('ฉันทายถูกแล้ว (เปิดคำของฉัน)', () => {
-          if (confirm('เปิดดูคำของคุณเลยไหม? กดแล้วย้อนกลับไม่ได้')) send({ t: 'done' });
-        }, 'primary'));
-      }
-      if (isHost) {
-        actions.append(button('เฉลยทุกคน', () => {
-          if (confirm('เฉลยคำของทุกคนเลยไหม?')) send({ t: 'reveal' });
-        }));
-      }
+    if (s.phase === 'playing' && isHost) {
+      actions.append(button('จบรอบ → ช่วงทายสุดท้าย', () => {
+        if (confirm('จบรอบตอนนี้แล้วให้ทุกคนทายคำของตัวเองครั้งสุดท้าย?')) send({ t: 'finish' });
+      }, 'primary'));
+      actions.append(button('เฉลยเลย (ข้ามช่วงทายสุดท้าย)', () => {
+        if (confirm('เฉลยคำของทุกคนเลยไหม?')) send({ t: 'reveal' });
+      }));
     }
+    if (s.phase === 'final' && isHost) {
+      actions.append(button('เฉลยทุกคน', () => {
+        if (confirm('เฉลยคำของทุกคนเลยไหม? ตัดสินคำทายครบแล้วใช่ไหม')) send({ t: 'reveal' });
+      }, 'primary'));
+    }
+
+    // ช่วงทายสุดท้าย: คนที่ยังไม่ถูกตัดสินว่าทายถูกพิมพ์ทายคำของตัวเอง
+    const form = $('guess-form');
+    const showGuess = s.phase === 'final' && !me.done;
+    if (showGuess && form.hidden) $('guess').value = me.guess || '';
+    form.hidden = !showGuess;
     if (s.phase === 'revealed' && isHost) {
       actions.append(button('เล่นรอบใหม่', () => send({ t: 'again' }), 'primary'));
     }
@@ -310,6 +343,15 @@
   }
   $('btn-join').addEventListener('click', joinFromForm);
   $('code').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinFromForm(); });
+
+  $('guess-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = $('guess').value.trim();
+    if (!text) return toast('พิมพ์คำทายก่อน');
+    send({ t: 'guess', text });
+    toast('ส่งคำทายแล้ว (แก้แล้วส่งใหม่ได้จนกว่าจะเฉลย)');
+    return undefined;
+  });
 
   $('btn-save-words').addEventListener('click', () => {
     const list = $('custom').value.split('\n');
