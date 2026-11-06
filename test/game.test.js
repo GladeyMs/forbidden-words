@@ -100,33 +100,133 @@ test('ไม่เห็นคำของตัวเอง แต่เห็�
 const me = (s) => s.players.find((p) => p.id === s.you);
 // คืน {} ถ้ายังไม่มีผู้เล่นชื่อนี้ (wait() ค้นย้อนข้อความเก่าที่ห้องยังไม่ครบคนด้วย)
 const byName = (s, n) => s.players.find((p) => p.name === n) || {};
-const mark = (host, name, correct = true) =>
-  host.send({ t: 'mark', id: byName(host.last('state'), name).id, correct });
+const idOf = (c, n) => byName(c.last('state'), n).id;
+const confirm = (c, n, correct = true) => c.send({ t: 'confirm', id: idOf(c, n), correct });
+const claim = (c, n, on = true) => c.send({ t: 'claim', id: idOf(c, n), on });
+const mark = confirm; // หัวห้องยืนยันผู้เล่นทั่วไป (ใช้กับการ์ดที่ไม่ใช่ของหัวห้อง)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-test('หัวห้องเป็นคนตัดสินว่าใครทายถูก: คนนั้นเห็นคำตัวเอง ผู้เล่นกดเองไม่ได้', async () => {
+// หัวห้อง (Alice) ทายถูก: Bob แจ้ง แล้ว Bob+Cara โหวตยืนยัน (ต้อง 2 จาก 2 คน)
+async function hostGuessed(host, bob, cara) {
+  claim(bob, 'Alice');
+  await host.wait((m) => m.t === 'state' && byName(m, 'Alice').claimedBy?.length > 0);
+  confirm(bob, 'Alice');
+  confirm(cara, 'Alice');
+  await host.wait((m) => m.t === 'state' && byName(m, 'Alice').done);
+}
+
+test('ผู้เล่นแจ้งว่าใครทายถูก หัวห้องเป็นคนยืนยัน: แจ้งแล้วยังไม่ได้คะแนนจนกว่าจะยืนยัน', async () => {
   const { game, host, bob, cara } = await setup3();
   host.send({ t: 'start' });
   await bob.wait((m) => m.phase === 'playing');
-  const bobId = bob.last('joined').you;
+  const bobId = idOf(bob, 'Bob');
 
-  bob.send({ t: 'mark', id: bobId, correct: true }); // ผู้เล่นกดว่าตัวเองถูกไม่ได้
+  // Bob แจ้งว่าตัวเองทายถูก และ Cara แจ้งว่า Bob ทายถูก (คนอื่นเห็นคำจึงเป็นพยานได้)
+  claim(bob, 'Bob');
+  claim(cara, 'Bob');
+  const pend = await host.wait((m) => m.t === 'state' && byName(m, 'Bob').claimedBy?.length === 2);
+  assert.deepStrictEqual(byName(pend, 'Bob').claimedBy.sort(), [bobId, idOf(cara, 'Cara')].sort());
+  assert.strictEqual(byName(pend, 'Bob').done, false);
+  assert.strictEqual(byName(pend, 'Bob').score, 0, 'แค่แจ้ง ยังไม่ได้คะแนน');
+  await sleep(60);
+  assert.strictEqual(me(bob.last('state')).word, null, 'แจ้งเองแล้วก็ยังไม่เห็นคำตัวเองจนกว่าหัวห้องยืนยัน');
+
+  // ผู้เล่นยืนยันเองไม่ได้
+  bob.send({ t: 'confirm', id: bobId, correct: true });
   assert.match((await bob.waitNew((m) => m.t === 'error')).msg, /หัวห้อง/);
-  bob.send({ t: 'done' }); // คำสั่งเก่าถูกยกเลิกแล้ว ต้องไม่มีผลอะไร
-  await new Promise((r) => setTimeout(r, 80));
+  bob.send({ t: 'mark', id: bobId, correct: true }); // คำสั่งเก่า ไม่มีผล
+  bob.send({ t: 'done' });
+  await sleep(60);
   assert.strictEqual(byName(host.last('state'), 'Bob').done, false);
-  assert.strictEqual(byName(host.last('state'), 'Bob').score, 0);
 
-  mark(host, 'Bob');
+  confirm(host, 'Bob'); // หัวห้องยืนยัน
   const s = await bob.wait((m) => m.t === 'state' && me(m).done);
-  assert.ok(me(s).word, 'ถูกตัดสินว่าทายถูกแล้วต้องเห็นคำตัวเอง');
-  const sh = host.last('state');
-  assert.strictEqual(me(sh).word, null, 'หัวห้องที่ยังไม่ถูกตัดสินต้องไม่เห็นคำตัวเอง');
-  assert.strictEqual(me(cara.last('state')).word, null);
+  assert.ok(me(s).word, 'ยืนยันแล้วต้องเห็นคำตัวเอง');
+  assert.deepStrictEqual(byName(s, 'Bob').claimedBy, [], 'ยืนยันแล้วคำขอถูกล้าง');
+  assert.strictEqual(byName(s, 'Bob').score, 3);
+  assert.strictEqual(me(host.last('state')).word, null, 'หัวห้องที่ยังไม่ถูกตัดสินต้องไม่เห็นคำตัวเอง');
 
   host.send({ t: 'reveal' });
   const sr = await host.wait((m) => m.phase === 'revealed');
   assert.ok(sr.players.every((p) => typeof p.word === 'string'));
   await closeAll(game, host, bob, cara);
+});
+
+test('หัวห้องปฏิเสธคำขอ / ถอนคำขอ / ยืนยันเองได้แม้ไม่มีใครแจ้ง', async () => {
+  const { game, host, bob, cara } = await setup3();
+  host.send({ t: 'start' });
+  await host.wait((m) => m.phase === 'playing');
+
+  claim(bob, 'Cara');
+  await host.wait((m) => m.t === 'state' && byName(m, 'Cara').claimedBy?.length === 1);
+  confirm(host, 'Cara', false); // ปฏิเสธ -> ล้างคำขอ ไม่ได้คะแนน
+  const rej = await host.waitNew((m) => m.t === 'state');
+  assert.deepStrictEqual(byName(rej, 'Cara').claimedBy, []);
+  assert.strictEqual(byName(rej, 'Cara').done, false);
+
+  claim(bob, 'Cara');
+  await host.waitNew((m) => m.t === 'state' && byName(m, 'Cara').claimedBy.length === 1);
+  claim(bob, 'Cara', false); // ถอนคำขอเอง
+  const wd = await host.waitNew((m) => m.t === 'state');
+  assert.deepStrictEqual(byName(wd, 'Cara').claimedBy, []);
+
+  confirm(host, 'Cara'); // ไม่มีใครแจ้ง หัวห้องยืนยันเองได้
+  const ok = await host.waitNew((m) => m.t === 'state' && byName(m, 'Cara').done);
+  assert.strictEqual(byName(ok, 'Cara').score, 3);
+  await closeAll(game, host, bob, cara);
+});
+
+test('หัวห้องทายถูก: ตัดสินตัวเองไม่ได้ ต้องเสียงข้างมากของผู้เล่นคนอื่น', async () => {
+  const { game, host, bob, cara } = await setup3();
+  host.send({ t: 'start' });
+  await host.wait((m) => m.phase === 'playing');
+
+  confirm(host, 'Alice'); // หัวห้องยืนยันตัวเองไม่ได้
+  assert.match((await host.waitNew((m) => m.t === 'error')).msg, /ตัวเอง/);
+  confirm(bob, 'Alice'); // ยังไม่มีใครแจ้ง โหวตไม่ได้
+  assert.match((await bob.waitNew((m) => m.t === 'error')).msg, /แจ้ง/);
+
+  claim(host, 'Alice'); // หัวห้องแจ้งเองได้
+  const pend = await bob.wait((m) => m.t === 'state' && byName(m, 'Alice').claimedBy?.length === 1);
+  assert.strictEqual(byName(pend, 'Alice').need, 2, '2 คนอื่น ต้องเกินครึ่ง = 2 เสียง');
+
+  confirm(bob, 'Alice');
+  const one = await host.wait((m) => m.t === 'state' && byName(m, 'Alice').votes?.confirm.length === 1);
+  assert.strictEqual(byName(one, 'Alice').done, false, 'เสียงเดียวยังไม่พอ');
+  confirm(bob, 'Alice', false); // ถอนโหวต
+  await host.waitNew((m) => m.t === 'state' && byName(m, 'Alice').votes.confirm.length === 0);
+  confirm(bob, 'Alice');
+  confirm(cara, 'Alice');
+  const done = await host.wait((m) => m.t === 'state' && byName(m, 'Alice').done);
+  assert.strictEqual(byName(done, 'Alice').score, 3);
+  assert.ok(me(done).word, 'ยืนยันแล้วหัวห้องเห็นคำตัวเอง');
+
+  // ยกเลิกคะแนนของหัวห้องต้องเสียงข้างมากเหมือนกัน
+  confirm(bob, 'Alice', false);
+  await sleep(80);
+  assert.strictEqual(byName(host.last('state'), 'Alice').done, true, 'ยกเลิกเสียงเดียวไม่พอ');
+  confirm(cara, 'Alice', false);
+  const undone = await host.waitNew((m) => m.t === 'state' && !byName(m, 'Alice').done);
+  assert.strictEqual(byName(undone, 'Alice').score, 0);
+  await closeAll(game, host, bob, cara);
+});
+
+test('ห้อง 2 คน: ผู้เล่นอีกคนเดียวตัดสินว่าหัวห้องทายถูก', async () => {
+  const { game, url } = await boot();
+  const a = client(url); await a.opened; a.send({ t: 'create', name: 'Alice' });
+  const j = await a.wait((m) => m.t === 'joined');
+  const b = client(url); await b.opened; b.send({ t: 'join', code: j.code, name: 'Bob' });
+  await b.wait((m) => m.t === 'joined');
+  await a.wait((m) => m.t === 'state' && m.players.length === 2);
+  a.send({ t: 'start' });
+  await b.wait((m) => m.phase === 'playing');
+  claim(a, 'Alice');
+  await b.wait((m) => m.t === 'state' && byName(m, 'Alice').claimedBy?.length === 1);
+  assert.strictEqual(byName(b.last('state'), 'Alice').need, 1);
+  confirm(b, 'Alice');
+  const s = await a.wait((m) => m.t === 'state' && byName(m, 'Alice').done);
+  assert.strictEqual(byName(s, 'Alice').score, 2);
+  await closeAll(game, a, b);
 });
 
 test('เฉพาะหัวห้องเท่านั้นที่เริ่ม/เฉลย/เตะ/เปลี่ยนคำได้', async () => {
@@ -321,63 +421,58 @@ test('เฉลยก่อนหมดเวลายกเลิกตัว�
   await closeAll(game, host, bob, cara);
 });
 
-test('หัวห้องตัดสินว่าถูกครบทุกคน: เฉลยด้วยเหตุผล all-done', async () => {
+test('ถูกครบทุกคน (หัวห้องยืนยันสองคน + โหวตให้หัวห้อง): เฉลยด้วยเหตุผล all-done', async () => {
   const { game, host, bob, cara } = await setup3();
   host.send({ t: 'start' });
   await host.wait((m) => m.phase === 'playing');
-  for (const n of ['Alice', 'Bob', 'Cara']) {
-    mark(host, n);
+  for (const n of ['Bob', 'Cara']) {
+    confirm(host, n);
     await host.wait((m) => m.t === 'state' && byName(m, n).done);
   }
+  await hostGuessed(host, bob, cara);
   const end = await host.wait((m) => m.t === 'state' && m.phase === 'revealed');
   assert.strictEqual(end.endReason, 'all-done');
+  assert.deepStrictEqual([byName(end, 'Bob').score, byName(end, 'Cara').score, byName(end, 'Alice').score], [3, 2, 1]);
   await closeAll(game, host, bob, cara);
 });
 
-test('คะแนนตามลำดับที่หัวห้องกด: 3 คนได้ 3/2/1 และกดซ้ำไม่ได้เพิ่ม', async () => {
-  const { game, host, bob, cara } = await setup3();
-  host.send({ t: 'start' });
-  const s0 = await host.wait((m) => m.t === 'state' && m.phase === 'playing');
-  assert.strictEqual(s0.round, 1);
-  assert.ok(s0.players.every((p) => p.score === 0 && p.roundPoints === 0));
-
-  mark(host, 'Cara');
-  await host.wait((m) => m.t === 'state' && byName(m, 'Cara').done);
-  mark(host, 'Cara'); // กดซ้ำ ไม่มีผล
-  mark(host, 'Alice');
-  await host.wait((m) => m.t === 'state' && byName(m, 'Alice').done);
-  mark(host, 'Bob');
-  const end = await host.wait((m) => m.t === 'state' && m.phase === 'revealed');
-  assert.strictEqual(byName(end, 'Cara').score, 3);
-  assert.strictEqual(byName(end, 'Alice').score, 2);
-  assert.strictEqual(byName(end, 'Bob').score, 1);
-  await closeAll(game, host, bob, cara);
-});
-
-test('กดยกเลิกการตัดสิน: อันดับและคะแนนคำนวณใหม่ถูกต้อง', async () => {
+test('ยกเลิกการยืนยัน: อันดับและคะแนนคำนวณใหม่ถูกต้อง', async () => {
   const { game, host, bob, cara } = await setup3();
   host.send({ t: 'start' });
   await host.wait((m) => m.phase === 'playing');
-  mark(host, 'Bob');
-  mark(host, 'Cara');
+  confirm(host, 'Bob');
+  confirm(host, 'Cara');
   let s = await host.wait((m) => m.t === 'state' && byName(m, 'Cara').done);
   assert.deepStrictEqual([byName(s, 'Bob').score, byName(s, 'Cara').score], [3, 2]);
 
-  mark(host, 'Bob', false); // กดผิด ยกเลิก -> Cara ขึ้นเป็นที่ 1
+  confirm(host, 'Bob', false); // กดผิด ยกเลิก -> Cara ขึ้นเป็นที่ 1
   s = await host.waitNew((m) => m.t === 'state');
   assert.strictEqual(byName(s, 'Bob').done, false);
   assert.deepStrictEqual([byName(s, 'Bob').score, byName(s, 'Cara').score], [0, 3]);
-  assert.strictEqual(byName(s, 'Bob').roundPoints, 0);
-  await new Promise((r) => setTimeout(r, 60)); // ให้ข้อความถึง Bob ก่อน (หัวห้องได้รับก่อนเสมอ)
-  assert.strictEqual(me(bob.last('state')).word, null, 'ถูกยกเลิกการตัดสินแล้ว Bob ต้องกลับไปมองไม่เห็นคำตัวเอง');
+  await sleep(60);
+  assert.strictEqual(me(bob.last('state')).word, null, 'ถูกยกเลิกแล้ว Bob ต้องกลับไปมองไม่เห็นคำตัวเอง');
 
-  mark(host, 'Bob'); // ตัดสินใหม่ -> Bob ได้ที่ 2
+  confirm(host, 'Bob'); // ยืนยันใหม่ -> Bob ได้ที่ 2
   s = await host.waitNew((m) => m.t === 'state');
   assert.deepStrictEqual([byName(s, 'Bob').score, byName(s, 'Cara').score], [2, 3]);
   await closeAll(game, host, bob, cara);
 });
 
-test('ช่วงทายสุดท้าย: ทายคำตัวเอง หัวห้องตัดสิน ถูกได้ 1 คะแนนคงที่', async () => {
+test('ผู้เล่นคนอื่นออกจากห้อง: จำนวนเสียงที่ต้องการลดลงและคำนวณใหม่', async () => {
+  const { game, host, bob, cara } = await setup3();
+  host.send({ t: 'start' });
+  await host.wait((m) => m.phase === 'playing');
+  claim(host, 'Alice'); // หัวห้องแจ้งตัวเอง
+  await bob.wait((m) => m.t === 'state' && byName(m, 'Alice').claimedBy?.length === 1);
+  confirm(bob, 'Alice'); // 1 เสียง ยังไม่พอ (ต้อง 2)
+  await host.wait((m) => m.t === 'state' && byName(m, 'Alice').votes?.confirm.length === 1);
+  cara.send({ t: 'leave' }); // เหลือผู้เล่นคนอื่น 1 คน -> ต้องการ 1 เสียง และ Bob โหวตไว้แล้ว
+  const s = await host.wait((m) => m.t === 'state' && m.players.length === 2 && byName(m, 'Alice').done);
+  assert.strictEqual(byName(s, 'Alice').done, true);
+  await closeAll(game, host, bob, cara);
+});
+
+test('ช่วงทายสุดท้าย: ทายคำตัวเอง ผู้เล่นแจ้ง หัวห้องยืนยัน ถูกได้ 1 คะแนนคงที่', async () => {
   const { game, host, bob, cara } = await setup3({ msPerMinute: 100 }); // 3 นาที = 300ms
   host.send({ t: 'time', minutes: 3 });
   host.send({ t: 'start' });
@@ -386,7 +481,7 @@ test('ช่วงทายสุดท้าย: ทายคำตัวเอ
   bob.send({ t: 'guess', text: 'ช้าง' }); // ยังไม่หมดเวลา ทายสุดท้ายไม่ได้
   assert.match((await bob.waitNew((m) => m.t === 'error')).msg, /หมดเวลา/);
 
-  mark(host, 'Cara'); // Cara ถูกตัดสินตอนยังเล่นอยู่: 3 คะแนน
+  confirm(host, 'Cara'); // Cara ถูกยืนยันตอนยังเล่นอยู่: 3 คะแนน
   await host.wait((m) => m.t === 'state' && byName(m, 'Cara').done);
   const fin = await host.wait((m) => m.t === 'state' && m.phase === 'final');
   assert.strictEqual(byName(fin, 'Cara').score, 3);
@@ -398,25 +493,27 @@ test('ช่วงทายสุดท้าย: ทายคำตัวเอ
   assert.strictEqual(byName(seen, 'Bob').late, false);
   assert.strictEqual(me(bob.last('state')).word, null, 'ทายแล้วก็ยังไม่เห็นคำตัวเองจนกว่าจะเฉลย');
 
-  cara.send({ t: 'guess', text: 'x' }); // คนที่ถูกตัดสินแล้วไม่ต้องทาย
-  cara.send({ t: 'mark', id: byName(seen, 'Bob').id, correct: true });
+  claim(cara, 'Bob'); // Cara เห็นคำของ Bob จึงแจ้งว่าคำทายถูก
+  await host.wait((m) => m.t === 'state' && byName(m, 'Bob').claimedBy?.length === 1);
+  cara.send({ t: 'confirm', id: byName(seen, 'Bob').id, correct: true }); // Cara ยืนยันเองไม่ได้
   assert.match((await cara.waitNew((m) => m.t === 'error')).msg, /หัวห้อง/);
 
-  mark(host, 'Bob'); // หัวห้องตัดสินว่า Bob ทายถูกในช่วงทายสุดท้าย
+  confirm(host, 'Bob');
   const afterBob = await host.wait((m) => m.t === 'state' && byName(m, 'Bob').done);
   assert.strictEqual(byName(afterBob, 'Bob').late, true);
   assert.strictEqual(byName(afterBob, 'Bob').score, 1);
   const bobSees = await bob.wait((m) => m.t === 'state' && m.phase === 'final' && me(m).done);
-  assert.ok(me(bobSees).word, 'ถูกตัดสินแล้วต้องเห็นคำตัวเอง');
+  assert.ok(me(bobSees).word, 'ถูกยืนยันแล้วต้องเห็นคำตัวเอง');
 
-  mark(host, 'Alice'); // ทุกคนถูกตัดสินครบ -> เฉลยอัตโนมัติ
+  await hostGuessed(host, bob, cara); // หัวห้องทายถูก (ช่วงทายสุดท้าย) -> 1 คะแนน แล้วเฉลยอัตโนมัติ
   const end = await host.wait((m) => m.t === 'state' && m.phase === 'revealed');
   assert.strictEqual(byName(end, 'Alice').score, 1);
+  assert.strictEqual(byName(end, 'Alice').late, true);
   assert.strictEqual(end.endReason, 'all-done');
   await closeAll(game, host, bob, cara);
 });
 
-test('หัวห้องจบรอบเอง: เข้าช่วงทายสุดท้าย (คนอื่นสั่งไม่ได้) / ถูกครบแล้วเฉลยเลย', async () => {
+test('หัวห้องจบรอบเอง: เข้าช่วงทายสุดท้าย (คนอื่นสั่งไม่ได้)', async () => {
   const { game, host, bob, cara } = await setup3();
   host.send({ t: 'start' });
   await host.wait((m) => m.phase === 'playing');
@@ -433,11 +530,11 @@ test('หัวห้องจบรอบเอง: เข้าช่วงท
   await closeAll(game, host, bob, cara);
 });
 
-test('คะแนนสะสมข้ามรอบ และรอบที่ไม่ได้ตัดสินได้ 0', async () => {
+test('คะแนนสะสมข้ามรอบ และรอบที่ไม่ได้ยืนยันได้ 0', async () => {
   const { game, host, bob, cara } = await setup3();
   host.send({ t: 'start' });
   await host.wait((m) => m.phase === 'playing');
-  mark(host, 'Bob');
+  confirm(host, 'Bob');
   await host.wait((m) => m.t === 'state' && byName(m, 'Bob').done);
   host.send({ t: 'reveal' });
   const r1 = await host.wait((m) => m.t === 'state' && m.phase === 'revealed');
@@ -446,17 +543,18 @@ test('คะแนนสะสมข้ามรอบ และรอบที�
   host.send({ t: 'again' });
   const lobby = await host.waitNew((m) => m.t === 'state' && m.phase === 'lobby');
   assert.strictEqual(byName(lobby, 'Bob').score, 3, 'กลับล็อบบี้คะแนนต้องไม่หาย');
-  assert.ok(lobby.players.every((p) => p.roundPoints === 0 && p.guess === null && p.late === false));
+  assert.ok(lobby.players.every((p) => p.roundPoints === 0 && p.guess === null && p.late === false &&
+    p.claimedBy.length === 0));
 
   host.send({ t: 'start' });
   await host.waitNew((m) => m.t === 'state' && m.phase === 'playing' && m.round === 2);
-  mark(host, 'Alice');
-  await host.wait((m) => m.t === 'state' && m.round === 2 && byName(m, 'Alice').done);
+  confirm(host, 'Cara');
+  await host.wait((m) => m.t === 'state' && m.round === 2 && byName(m, 'Cara').done);
   host.send({ t: 'reveal' });
   const r2 = await host.waitNew((m) => m.t === 'state' && m.phase === 'revealed');
-  assert.strictEqual(byName(r2, 'Alice').score, 3);
+  assert.strictEqual(byName(r2, 'Cara').score, 3);
   assert.strictEqual(byName(r2, 'Bob').score, 3);
-  assert.strictEqual(byName(r2, 'Bob').roundPoints, 0, 'รอบนี้ Bob ไม่ได้ถูกตัดสินว่าทายถูก');
+  assert.strictEqual(byName(r2, 'Bob').roundPoints, 0, 'รอบนี้ Bob ไม่ได้ยืนยัน');
   await closeAll(game, host, bob, cara);
 });
 
@@ -464,20 +562,19 @@ test('รีเซ็ตคะแนน: เฉพาะหัวห้องแ
   const { game, host, bob, cara } = await setup3();
   host.send({ t: 'start' });
   await host.wait((m) => m.phase === 'playing');
-  mark(host, 'Bob');
+  confirm(host, 'Bob');
   await bob.wait((m) => m.t === 'state' && me(m).done && me(m).score === 3);
 
   host.send({ t: 'resetscores' });
   assert.match((await host.waitNew((m) => m.t === 'error')).msg, /ก่อนเริ่มเกม/);
 
-  // ยกเลิกรอบกลางคัน (again ระหว่างเล่น) ต้องคืนคะแนนของรอบนั้น
-  host.send({ t: 'again' });
+  host.send({ t: 'again' }); // ยกเลิกรอบกลางคัน ต้องคืนคะแนนของรอบนั้น
   const lobby = await host.waitNew((m) => m.t === 'state' && m.phase === 'lobby');
   assert.strictEqual(byName(lobby, 'Bob').score, 0, 'รอบที่ไม่จบต้องไม่เก็บคะแนน');
 
   host.send({ t: 'start' });
   await host.waitNew((m) => m.t === 'state' && m.phase === 'playing');
-  mark(host, 'Bob');
+  confirm(host, 'Bob');
   await bob.waitNew((m) => m.t === 'state' && me(m).score === 3);
   host.send({ t: 'reveal' });
   await host.waitNew((m) => m.t === 'state' && m.phase === 'revealed');
@@ -492,5 +589,20 @@ test('รีเซ็ตคะแนน: เฉพาะหัวห้องแ
   host.send({ t: 'resetscores' });
   const reset = await cara.waitNew((m) => m.t === 'state' && m.players.every((p) => p.score === 0));
   assert.strictEqual(reset.round, 0);
+  await closeAll(game, host, bob, cara);
+});
+
+test('หัวห้องออกกลางรอบ: ผู้ตัดสินคนใหม่ คำขอและโหวตที่ค้างถูกล้าง', async () => {
+  const { game, host, bob, cara } = await setup3();
+  host.send({ t: 'start' });
+  await host.wait((m) => m.phase === 'playing');
+  claim(cara, 'Bob');
+  await bob.wait((m) => m.t === 'state' && byName(m, 'Bob').claimedBy?.length === 1);
+  host.send({ t: 'leave' });
+  const s = await bob.wait((m) => m.t === 'state' && m.players.length === 2 && m.hostId !== undefined &&
+    !m.players.some((p) => p.name === 'Alice'));
+  assert.ok(['Bob', 'Cara'].includes(byName(s, s.players.find((p) => p.id === s.hostId).name).name));
+  assert.ok(s.players.every((p) => p.claimedBy.length === 0), 'คำขอที่ค้างต้องถูกล้างเมื่อผู้ตัดสินเปลี่ยน');
+  assert.strictEqual(s.phase, 'playing');
   await closeAll(game, host, bob, cara);
 });

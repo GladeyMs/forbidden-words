@@ -103,19 +103,17 @@
       return isHost ? 'พร้อมแล้ว กด "เริ่มเกม" ได้เลย' : 'รอหัวห้องเริ่มเกม...';
     }
     if (s.phase === 'playing') {
-      if (isHost) return 'ฟังเพื่อนทาย แล้วกด "✓ ทายถูก" ที่การ์ดของคนที่ทายคำตัวเองถูก (ตามลำดับก่อน-หลัง)';
-      return me.done
-        ? 'หัวห้องตัดสินว่าคุณทายถูกแล้ว! รอคนอื่นทายต่อ'
-        : 'ถามคำถามเพื่อทายคำบนหัวคุณ (พูดคุยกันนอกเกม) แล้วรอหัวห้องตัดสินว่าทายถูก';
+      if (me.done) return 'คุณทายถูกแล้ว! รอคนอื่นทายต่อ';
+      return isHost
+        ? 'เมื่อมีคนแจ้งว่าใครทายถูก กด "✓ ยืนยัน" ที่การ์ดของคนนั้น (ถ้าเป็นคุณเองที่ทายถูก ให้เพื่อนโหวตยืนยัน)'
+        : 'ถามคำถามเพื่อทายคำบนหัวคุณ (พูดคุยกันนอกเกม) ใครทายถูกกด "แจ้งว่าทายถูก" ที่การ์ดเขา แล้วรอหัวห้องยืนยัน';
     }
     if (s.phase === 'final') {
       const why = s.endReason === 'timeout' ? 'หมดเวลา!' : 'หัวห้องจบรอบแล้ว!';
-      if (isHost) {
-        return `${why} ช่วงทายสุดท้าย: ดูคำทายของแต่ละคน กด "✓ ทายถูก" ถ้าถูก (ได้ 1 คะแนน) แล้วกดเฉลย`;
-      }
-      return me.done
-        ? `${why} คุณทายถูกแล้ว รอคนอื่นทายสุดท้าย`
-        : `${why} ช่วงทายสุดท้าย: พิมพ์ทายคำของตัวเอง แล้วรอหัวห้องตัดสิน`;
+      if (me.done) return `${why} คุณทายถูกแล้ว รอคนอื่นทายสุดท้าย`;
+      return isHost
+        ? `${why} ช่วงทายสุดท้าย: ดูคำทายของแต่ละคน ใครถูกให้ผู้เล่นแจ้ง แล้วกด "✓ ยืนยัน" (ได้ 1 คะแนน) จากนั้นกดเฉลย`
+        : `${why} ช่วงทายสุดท้าย: พิมพ์ทายคำของตัวเอง ใครเห็นว่าถูกให้กด "แจ้งว่าทายถูก" แล้วรอหัวห้องยืนยัน`;
     }
     if (s.endReason === 'timeout') return 'หมดเวลา! เฉลยคำของทุกคนแล้ว';
     if (s.endReason === 'all-done') return 'ทุกคนทายถูกแล้ว! ดูคำของทุกคนด้านล่าง';
@@ -157,6 +155,47 @@
       li.append(el('span', 'pts', String(p.score)));
       list.append(li);
     });
+  }
+
+  // แจ้ง-ยืนยัน: ทุกคนแจ้งได้ว่า "คนนี้ทายถูก" (กดที่การ์ด = คำนี้เป็นของคนนี้)
+  // หัวห้องยืนยัน/ปฏิเสธ แต่ถ้าเป็นการ์ดของหัวห้องเอง ให้ผู้เล่นคนอื่นโหวตเสียงข้างมาก
+  function judgeRow(s, p, isHost) {
+    const nameOf = (id) => (s.players.find((x) => x.id === id) || { name: '?' }).name;
+    const row = el('div', 'judge-row');
+    const isHostCard = p.id === s.hostId;
+    const votes = p.votes || { confirm: [], undo: [] };
+
+    if (p.done) {
+      if (!isHostCard && isHost) {
+        row.append(button('ยกเลิก', () => send({ t: 'confirm', id: p.id, correct: false }), 'judge undo'));
+      } else if (isHostCard && !isHost) {
+        const voted = votes.undo.includes(s.you);
+        row.append(button(`${voted ? 'ถอนโหวต' : 'ยกเลิก'} (${votes.undo.length}/${p.need})`,
+          () => send({ t: 'confirm', id: p.id, correct: voted }), 'judge undo'));
+      }
+      return row.childElementCount ? row : null;
+    }
+
+    const mine = p.claimedBy.includes(s.you);
+    row.append(button(mine ? 'ถอนคำแจ้ง' : (p.id === s.you ? '🙋 ฉันทายถูก' : '🙋 แจ้งว่าทายถูก'),
+      () => send({ t: 'claim', id: p.id, on: !mine }), `claim${mine ? ' mine' : ''}`));
+
+    if (!isHostCard && isHost) {
+      row.append(button('✓ ยืนยัน', () => send({ t: 'confirm', id: p.id, correct: true }), 'judge'));
+      if (p.claimedBy.length) {
+        row.append(button('✗ ปฏิเสธ', () => send({ t: 'confirm', id: p.id, correct: false }), 'judge undo'));
+      }
+    } else if (isHostCard && !isHost && p.claimedBy.length) {
+      const voted = votes.confirm.includes(s.you);
+      row.append(button(`${voted ? 'ถอนโหวต' : '✓ ยืนยัน'} (${votes.confirm.length}/${p.need})`,
+        () => send({ t: 'confirm', id: p.id, correct: !voted }), voted ? 'judge voted' : 'judge'));
+    } else if (isHostCard && isHost && p.claimedBy.length) {
+      row.append(el('span', 'hint', `รอผู้เล่นอื่นโหวตยืนยัน (${votes.confirm.length}/${p.need})`));
+    }
+    if (p.claimedBy.length) {
+      row.append(el('div', 'pending', `🙋 แจ้งว่าทายถูกโดย: ${p.claimedBy.map(nameOf).join(', ')}`));
+    }
+    return row;
   }
 
   function el(tag, cls, text) {
@@ -227,12 +266,6 @@
         if (s.phase !== 'lobby' && p.roundPoints > 0) right.append(el('span', 'gain', `+${p.roundPoints}`));
         right.append(el('span', 'score', `⭐ ${p.score}`));
       }
-      if (isHost && (s.phase === 'playing' || s.phase === 'final')) {
-        // หัวห้องเป็นคนตัดสิน: กดที่การ์ด = คำนั้นเป็นของคนนี้และเขาทายถูก (กดซ้ำเพื่อยกเลิก)
-        right.append(button(p.done ? 'ยกเลิก' : '✓ ทายถูก', () => {
-          send({ t: 'mark', id: p.id, correct: !p.done });
-        }, p.done ? 'judge undo' : 'judge'));
-      }
       if (isHost && p.id !== s.you && s.phase === 'lobby') {
         right.append(button('เชิญออก', () => {
           if (confirm(`เชิญ ${p.name} ออกจากห้อง?`)) send({ t: 'kick', id: p.id });
@@ -249,6 +282,10 @@
           g.append(el('b', '', 'คำทาย: '));
           g.append(document.createTextNode(p.guess));
           li.append(g);
+        }
+        if (s.phase === 'playing' || s.phase === 'final') {
+          const row = judgeRow(s, p, isHost);
+          if (row) li.append(row);
         }
       }
       list.append(li);

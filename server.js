@@ -109,6 +109,9 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
           score: p.score,
           roundPoints: p.done ? p.roundPoints : 0,
           late: p.late,
+          claimedBy: p.claimedBy,
+          votes: p.id === room.hostId ? p.votes : null,
+          need: p.id === room.hostId ? votesNeeded(room) : null,
           guess: room.phase === 'final' || revealed ? p.guess : null,
         };
       }),
@@ -140,6 +143,7 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
       room.players.find((p) => p.connected);
     if (next) {
       room.hostId = next.id;
+      resetPending(room); // ผู้ตัดสินเปลี่ยน คำขอ/โหวตที่ค้างต้องเริ่มใหม่
       broadcast(room);
     }
   }
@@ -153,7 +157,10 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
     if (room.hostId === player.id) {
       clearTimeout(room.hostTimer);
       room.hostId = room.players.find((p) => p.connected)?.id || room.players[0].id;
+      resetPending(room);
     }
+    purgePlayerRefs(room, player.id);
+    evaluateHostVotes(room);
     if (room.phase === 'playing' || room.phase === 'final') recalc(room);
     maybeAutoReveal(room);
     broadcast(room);
@@ -244,6 +251,8 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
       roundPoints: 0,
       late: false,
       guess: null,
+      claimedBy: [], // ผู้เล่นที่แจ้งว่าคนนี้ทายถูก (รอการยืนยัน)
+      votes: { confirm: [], undo: [] }, // ใช้เฉพาะการ์ดของหัวห้อง: เสียงของผู้เล่นคนอื่น
     };
   }
 
@@ -313,6 +322,8 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
       p.done = false;
       p.late = false;
       p.guess = null;
+      p.claimedBy = [];
+      p.votes = { confirm: [], undo: [] };
       p.baseScore = p.score;
       p.roundPoints = 0;
     });
@@ -325,25 +336,115 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
     broadcast(room);
   }
 
-  // หัวห้องเป็นคนตัดสินว่าใครทายถูก (กดที่คนนั้น = คำนั้นเป็นของคนนั้น) ผู้เล่นกดเองไม่ได้
-  function handleMark(room, player, msg) {
-    if (player.id !== room.hostId) return fail(player.ws, 'เฉพาะหัวห้องเท่านั้น');
-    if (room.phase !== 'playing' && room.phase !== 'final') return undefined;
-    const target = room.players.find((p) => p.id === msg.id);
-    if (!target || typeof msg.correct !== 'boolean') return undefined;
-    if (msg.correct && !target.done) {
-      target.done = true;
-      target.late = room.phase === 'final';
-      if (!target.late) room.order.push(target.id);
-    } else if (!msg.correct && target.done) {
-      target.done = false;
-      target.late = false;
-    } else {
-      return undefined;
+  // ---- ระบบแจ้ง-ยืนยัน ----
+  // ผู้เล่นคนไหนก็แจ้งได้ว่า "คนนี้ทายถูก" (กดที่การ์ดของเขา = คำนี้เป็นของเขา)
+  // การยืนยันจริง: คนอื่นยืนยันโดยหัวห้อง / ถ้าเป็นหัวห้องเองที่ทายถูก ให้ผู้เล่นคนอื่นโหวตเสียงข้างมาก
+  const emptyVotes = () => ({ confirm: [], undo: [] });
+
+  function setDone(room, t) {
+    t.done = true;
+    t.late = room.phase === 'final';
+    if (!t.late) room.order.push(t.id);
+    t.claimedBy = [];
+    t.votes = emptyVotes();
+  }
+
+  function unsetDone(room, t) {
+    t.done = false;
+    t.late = false;
+    t.claimedBy = [];
+    t.votes = emptyVotes();
+  }
+
+  // เสียงที่ต้องการเพื่อยืนยัน/ยกเลิกการ์ดของหัวห้อง: เกินครึ่งของผู้เล่นคนอื่น
+  function votesNeeded(room) {
+    return Math.floor((room.players.length - 1) / 2) + 1;
+  }
+
+  function purgePlayerRefs(room, id) {
+    for (const p of room.players) {
+      p.claimedBy = p.claimedBy.filter((x) => x !== id);
+      p.votes = { confirm: p.votes.confirm.filter((x) => x !== id), undo: p.votes.undo.filter((x) => x !== id) };
     }
+  }
+
+  // ผู้ตัดสินเปลี่ยน (หัวห้องใหม่) -> คำขอและโหวตที่ค้างหมดความหมาย ล้างทิ้ง (ผลที่ตัดสินแล้วคงเดิม)
+  function resetPending(room) {
+    for (const p of room.players) {
+      p.claimedBy = [];
+      p.votes = emptyVotes();
+    }
+  }
+
+  // คืน true ถ้าผลการโหวตเปลี่ยนสถานะของหัวห้อง
+  function evaluateHostVotes(room) {
+    if (room.phase !== 'playing' && room.phase !== 'final') return false;
+    const host = room.players.find((p) => p.id === room.hostId);
+    if (!host || room.players.length < 2) return false;
+    const need = votesNeeded(room);
+    const valid = (ids) => ids.filter((id) => id !== host.id && room.players.some((p) => p.id === id));
+    if (!host.done && host.claimedBy.length > 0 && valid(host.votes.confirm).length >= need) {
+      setDone(room, host);
+      return true;
+    }
+    if (host.done && valid(host.votes.undo).length >= need) {
+      unsetDone(room, host);
+      return true;
+    }
+    return false;
+  }
+
+  function afterJudge(room) {
     recalc(room);
     maybeAutoReveal(room);
     broadcast(room);
+  }
+
+  function handleClaim(room, player, msg) {
+    if (room.phase !== 'playing' && room.phase !== 'final') return;
+    const target = room.players.find((p) => p.id === msg.id);
+    if (!target || target.done) return;
+    const on = msg.on !== false;
+    const has = target.claimedBy.includes(player.id);
+    if (on && !has) target.claimedBy.push(player.id);
+    else if (!on && has) target.claimedBy = target.claimedBy.filter((x) => x !== player.id);
+    else return;
+    if (target.claimedBy.length === 0) target.votes = emptyVotes();
+    broadcast(room);
+  }
+
+  function handleConfirm(room, player, msg) {
+    if (room.phase !== 'playing' && room.phase !== 'final') return undefined;
+    const target = room.players.find((p) => p.id === msg.id);
+    if (!target || typeof msg.correct !== 'boolean') return undefined;
+
+    if (target.id !== room.hostId) {
+      // ผู้เล่นทั่วไป: หัวห้องเป็นผู้ตัดสิน (ยืนยันได้แม้ยังไม่มีใครแจ้ง / ปฏิเสธ = ล้างคำขอ / ยกเลิกคะแนนได้)
+      if (player.id !== room.hostId) return fail(player.ws, 'เฉพาะหัวห้องเท่านั้นที่ยืนยันได้');
+      if (msg.correct && !target.done) setDone(room, target);
+      else if (!msg.correct && target.done) unsetDone(room, target);
+      else if (!msg.correct && target.claimedBy.length > 0) target.claimedBy = [];
+      else return undefined;
+      afterJudge(room);
+      return undefined;
+    }
+
+    // การ์ดของหัวห้องเอง: หัวห้องตัดสินตัวเองไม่ได้ ให้ผู้เล่นคนอื่นโหวต
+    if (player.id === room.hostId) {
+      return fail(player.ws, 'หัวห้องยืนยันคำทายของตัวเองไม่ได้ ต้องให้ผู้เล่นคนอื่นโหวต');
+    }
+    const key = target.done ? 'undo' : 'confirm'; // ทายถูกแล้ว -> โหวตยกเลิก, ยังไม่ถูก -> โหวตยืนยัน
+    if (!target.done && msg.correct && target.claimedBy.length === 0) {
+      return fail(player.ws, 'ยังไม่มีใครแจ้งว่าหัวห้องทายถูก กด "แจ้งทายถูก" ก่อน');
+    }
+    const wantsVote = target.done ? !msg.correct : msg.correct;
+    const list = target.votes[key];
+    const has = list.includes(player.id);
+    if (wantsVote && !has) list.push(player.id);
+    else if (!wantsVote && has) target.votes[key] = list.filter((x) => x !== player.id);
+    else return undefined;
+    evaluateHostVotes(room);
+    afterJudge(room);
     return undefined;
   }
 
@@ -388,6 +489,8 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
       p.done = false;
       p.late = false;
       p.guess = null;
+      p.claimedBy = [];
+      p.votes = { confirm: [], undo: [] };
       p.roundPoints = 0;
     });
     room.order = [];
@@ -466,7 +569,8 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
       const { room, player } = ws.ctx;
       switch (msg.t) {
         case 'start': return handleStart(room, player);
-        case 'mark': return handleMark(room, player, msg);
+        case 'claim': return handleClaim(room, player, msg);
+        case 'confirm': return handleConfirm(room, player, msg);
         case 'guess': return handleGuess(room, player, msg);
         case 'finish': return handleFinish(room, player);
         case 'reveal': return handleReveal(room, player);

@@ -90,8 +90,14 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .guess-form .row input { margin-bottom: 0; }
 .guess { margin-top: 6px; font-size: .95rem; overflow-wrap: anywhere; }
 .guess b { color: var(--accent); }
-button.judge { min-height: 36px; padding: 6px 12px; background: var(--good); color: #fff; border-color: var(--good); }
-button.judge.undo { background: var(--card); color: var(--muted); border-color: var(--line); }
+.judge-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.judge-row button { min-height: 36px; padding: 6px 12px; font-size: .92rem; }
+button.judge { background: var(--good); color: #fff; border-color: var(--good); }
+button.judge.undo, button.judge.voted { background: var(--card); color: var(--muted); border-color: var(--line); }
+button.claim { border-color: var(--accent); color: var(--accent); }
+button.claim.mine { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.pending { flex-basis: 100%; font-size: .88rem; color: var(--warn); font-weight: 600; }
+.hint { font-size: .85rem; color: var(--muted); }
 .right { display: flex; align-items: center; gap: 8px; }
 .score { font-weight: 800; white-space: nowrap; }
 .gain { font-weight: 700; color: var(--good); }
