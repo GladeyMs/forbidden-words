@@ -5,8 +5,8 @@ const assert = require('node:assert');
 const WebSocket = require('ws');
 const { createGameServer } = require('../server');
 
-async function boot() {
-  const game = createGameServer();
+async function boot(opts) {
+  const game = createGameServer(opts);
   await new Promise((r) => game.server.listen(0, '127.0.0.1', r));
   const port = game.server.address().port;
   return { game, url: `ws://127.0.0.1:${port}/ws` };
@@ -39,8 +39,8 @@ function client(url) {
   return c;
 }
 
-async function setup3() {
-  const { game, url } = await boot();
+async function setup3(opts) {
+  const { game, url } = await boot(opts);
   const host = client(url);
   await host.opened;
   host.send({ t: 'create', name: 'Alice' });
@@ -227,4 +227,82 @@ test('หัวห้องกดออก สิทธิ์โอนให้�
   const s = await b.wait((m) => m.t === 'state' && m.players.length === 1);
   assert.strictEqual(s.hostId, s.you);
   await closeAll(game, a, b);
+});
+
+test('หัวห้องตั้งเวลา 3/5/7 นาทีได้ คนอื่นตั้งไม่ได้ ค่าอื่นถูกปฏิเสธ', async () => {
+  const { game, host, bob, cara } = await setup3();
+  assert.strictEqual(host.last('state').timeLimit, 5, 'ค่าเริ่มต้น 5 นาที');
+  assert.deepStrictEqual(host.last('state').timeOptions, [3, 5, 7]);
+
+  host.send({ t: 'time', minutes: 7 });
+  assert.strictEqual((await bob.wait((m) => m.t === 'state' && m.timeLimit === 7)).timeLimit, 7);
+  host.send({ t: 'time', minutes: 3 });
+  await cara.wait((m) => m.t === 'state' && m.timeLimit === 3);
+
+  bob.send({ t: 'time', minutes: 5 });
+  assert.match((await bob.waitNew((m) => m.t === 'error')).msg, /หัวห้อง/);
+  for (const bad of [4, 0, -3, 999, '5', null, 5.5, [5]]) {
+    host.send({ t: 'time', minutes: bad });
+    assert.match((await host.waitNew((m) => m.t === 'error')).msg, /3, 5 หรือ 7/);
+  }
+  assert.strictEqual(host.last('state').timeLimit, 3, 'ค่าที่ผิดต้องไม่เปลี่ยนเวลา');
+
+  host.send({ t: 'start' });
+  const playing = await host.wait((m) => m.t === 'state' && m.phase === 'playing');
+  assert.ok(playing.remainingMs > 3 * 60 * 1000 - 5000 && playing.remainingMs <= 3 * 60 * 1000);
+  host.send({ t: 'time', minutes: 7 });
+  assert.match((await host.waitNew((m) => m.t === 'error')).msg, /ก่อนเริ่มเกม/);
+  assert.strictEqual(host.last('state').timeLimit, 3);
+  await closeAll(game, host, bob, cara);
+});
+
+test('หมดเวลาแล้วเฉลยอัตโนมัติ และรอบใหม่ได้เวลาใหม่เต็ม', async () => {
+  const { game, host, bob, cara } = await setup3({ msPerMinute: 50 }); // 3 นาที = 150ms
+  host.send({ t: 'time', minutes: 3 });
+  await host.wait((m) => m.t === 'state' && m.timeLimit === 3);
+  host.send({ t: 'start' });
+  const s = await bob.wait((m) => m.t === 'state' && m.phase === 'playing');
+  assert.ok(s.remainingMs > 0 && s.remainingMs <= 150);
+  assert.strictEqual(s.players.find((p) => p.id === s.you).word, null);
+
+  const end = await bob.wait((m) => m.t === 'state' && m.phase === 'revealed');
+  assert.strictEqual(end.endReason, 'timeout');
+  assert.strictEqual(end.remainingMs, null);
+  assert.ok(end.players.every((p) => typeof p.word === 'string'), 'หมดเวลาแล้วต้องเห็นทุกคำ');
+
+  // รอบใหม่: ตัวจับเวลาเริ่มใหม่ ไม่โดนตัวเก่าตัดจบ
+  host.send({ t: 'again' });
+  await host.waitNew((m) => m.t === 'state' && m.phase === 'lobby');
+  host.send({ t: 'start' });
+  const s2 = await host.waitNew((m) => m.t === 'state' && m.phase === 'playing');
+  assert.ok(s2.remainingMs > 100, 'รอบใหม่ต้องได้เวลาเต็ม');
+  await closeAll(game, host, bob, cara);
+});
+
+test('เฉลยก่อนหมดเวลายกเลิกตัวจับเวลา และกลับล็อบบี้แล้วไม่ถูกตัวเก่ามารบกวน', async () => {
+  const { game, host, bob, cara } = await setup3({ msPerMinute: 50 });
+  host.send({ t: 'time', minutes: 3 });
+  host.send({ t: 'start' });
+  await host.wait((m) => m.t === 'state' && m.phase === 'playing');
+  host.send({ t: 'reveal' });
+  const rev = await host.wait((m) => m.t === 'state' && m.phase === 'revealed');
+  assert.strictEqual(rev.endReason, 'host');
+  host.send({ t: 'again' });
+  await host.waitNew((m) => m.t === 'state' && m.phase === 'lobby');
+
+  const count = host.msgs.length;
+  await new Promise((r) => setTimeout(r, 300)); // เลยเวลาเดิมไปแล้ว
+  assert.strictEqual(host.msgs.length, count, 'ตัวจับเวลาเก่าต้องไม่ส่งอะไรหลังยกเลิก');
+  assert.strictEqual(host.last('state').phase, 'lobby');
+  await closeAll(game, host, bob, cara);
+});
+
+test('ทุกคนทายถูกก่อนหมดเวลา: เฉลยด้วยเหตุผล all-done', async () => {
+  const { game, host, bob, cara } = await setup3();
+  host.send({ t: 'start' });
+  await host.wait((m) => m.phase === 'playing');
+  for (const c of [host, bob, cara]) c.send({ t: 'done' });
+  const end = await host.wait((m) => m.t === 'state' && m.phase === 'revealed');
+  assert.strictEqual(end.endReason, 'all-done');
+  await closeAll(game, host, bob, cara);
 });

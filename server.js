@@ -11,6 +11,8 @@ const DEFAULT_WORDS = require('./words.json');
 const MAX_PLAYERS = 12;
 const MIN_PLAYERS = 2;
 const MAX_CUSTOM_WORDS = 100;
+const TIME_OPTIONS = [3, 5, 7]; // นาที ให้หัวห้องเลือก
+const DEFAULT_TIME = 5;
 const HOST_GRACE_MS = 20 * 1000; // รอให้หัวห้องรีเฟรช/กลับมาก่อนโอนสิทธิ์
 const ROOM_IDLE_MS = 10 * 60 * 1000; // ห้องที่ไม่มีใครออนไลน์จะถูกลบ
 const RATE_WINDOW_MS = 5000;
@@ -46,7 +48,8 @@ function shuffle(arr) {
   return a;
 }
 
-function createGameServer() {
+// msPerMinute ปรับได้เฉพาะตอนเทสต์ (ให้เวลาเดินเร็ว)
+function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
   const rooms = new Map();
 
   const app = express();
@@ -82,6 +85,11 @@ function createGameServer() {
       you: me.id,
       maxPlayers: MAX_PLAYERS,
       minPlayers: MIN_PLAYERS,
+      timeLimit: room.timeLimit,
+      timeOptions: TIME_OPTIONS,
+      // เวลาที่เหลือคิดจากนาฬิกาเซิร์ฟเวอร์ ส่งเป็นมิลลิวินาทีที่เหลือ (ไม่พึ่งนาฬิกาเครื่องผู้เล่น)
+      remainingMs: room.phase === 'playing' && room.endsAt ? Math.max(0, room.endsAt - Date.now()) : null,
+      endReason: room.phase === 'revealed' ? room.endReason : null,
       customCount: room.custom.length,
       customWords: isHost ? room.custom : undefined,
       players: room.players.map((p) => {
@@ -110,6 +118,7 @@ function createGameServer() {
   function destroyRoom(room) {
     clearTimeout(room.idleTimer);
     clearTimeout(room.hostTimer);
+    clearTimeout(room.roundTimer);
     rooms.delete(room.code);
   }
 
@@ -137,9 +146,29 @@ function createGameServer() {
     scheduleIdleCleanup(room);
   }
 
+  function startRoundTimer(room) {
+    clearTimeout(room.roundTimer);
+    const ms = room.timeLimit * msPerMinute;
+    room.endsAt = Date.now() + ms;
+    room.roundTimer = setTimeout(() => {
+      if (room.phase !== 'playing') return;
+      endRound(room, 'timeout');
+      broadcast(room);
+    }, ms);
+    room.roundTimer.unref?.();
+  }
+
+  function endRound(room, reason) {
+    clearTimeout(room.roundTimer);
+    room.roundTimer = null;
+    room.endsAt = null;
+    room.phase = 'revealed';
+    room.endReason = reason;
+  }
+
   function maybeAutoReveal(room) {
     if (room.phase === 'playing' && room.players.length > 0 && room.players.every((p) => p.done)) {
-      room.phase = 'revealed';
+      endRound(room, 'all-done');
     }
   }
 
@@ -183,6 +212,10 @@ function createGameServer() {
       hostId: null,
       players: [],
       custom: [],
+      timeLimit: DEFAULT_TIME,
+      endsAt: null,
+      endReason: null,
+      roundTimer: null,
       idleTimer: null,
       hostTimer: null,
     };
@@ -232,6 +265,8 @@ function createGameServer() {
       p.done = false;
     });
     room.phase = 'playing';
+    room.endReason = null;
+    startRoundTimer(room);
     broadcast(room);
   }
 
@@ -245,13 +280,17 @@ function createGameServer() {
   function handleReveal(room, player) {
     if (player.id !== room.hostId) return fail(player.ws, 'เฉพาะหัวห้องเท่านั้น');
     if (room.phase !== 'playing') return;
-    room.phase = 'revealed';
+    endRound(room, 'host');
     broadcast(room);
   }
 
   function handleAgain(room, player) {
     if (player.id !== room.hostId) return fail(player.ws, 'เฉพาะหัวห้องเท่านั้น');
     if (room.phase === 'lobby') return;
+    clearTimeout(room.roundTimer);
+    room.roundTimer = null;
+    room.endsAt = null;
+    room.endReason = null;
     room.phase = 'lobby';
     room.players.forEach((p) => {
       p.word = null;
@@ -264,6 +303,14 @@ function createGameServer() {
     if (player.id !== room.hostId) return fail(player.ws, 'เฉพาะหัวห้องเท่านั้น');
     if (room.phase !== 'lobby') return fail(player.ws, 'แก้คำได้เฉพาะก่อนเริ่มเกม');
     room.custom = cleanWords(msg.list);
+    broadcast(room);
+  }
+
+  function handleTime(room, player, msg) {
+    if (player.id !== room.hostId) return fail(player.ws, 'เฉพาะหัวห้องเท่านั้น');
+    if (room.phase !== 'lobby') return fail(player.ws, 'ตั้งเวลาได้เฉพาะก่อนเริ่มเกม');
+    if (!TIME_OPTIONS.includes(msg.minutes)) return fail(player.ws, 'เลือกได้เฉพาะ 3, 5 หรือ 7 นาที');
+    room.timeLimit = msg.minutes;
     broadcast(room);
   }
 
@@ -316,6 +363,7 @@ function createGameServer() {
         case 'reveal': return handleReveal(room, player);
         case 'again': return handleAgain(room, player);
         case 'words': return handleWords(room, player, msg);
+        case 'time': return handleTime(room, player, msg);
         case 'kick': return handleKick(room, player, msg);
         case 'leave': return handleLeave(ws, room, player);
         default: return undefined;
@@ -348,6 +396,7 @@ function createGameServer() {
     for (const room of rooms.values()) {
       clearTimeout(room.idleTimer);
       clearTimeout(room.hostTimer);
+      clearTimeout(room.roundTimer);
     }
     for (const client of wss.clients) client.terminate();
     wss.close();

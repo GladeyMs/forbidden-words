@@ -8,6 +8,7 @@
   let state = null;
   let retry = 0;
   let pending = null; // ข้อความที่รอส่งตอนเชื่อมต่อเสร็จ
+  let deadline = null; // เวลาหมดรอบ (performance.now) คำนวณจากเวลาที่เหลือที่เซิร์ฟเวอร์ส่งมา
   let session = loadSession();
 
   function loadSession() {
@@ -75,6 +76,7 @@
         break;
       case 'state':
         state = m;
+        deadline = m.remainingMs == null ? null : performance.now() + m.remainingMs;
         render();
         break;
       case 'error':
@@ -105,7 +107,24 @@
         ? 'คุณทายถูกแล้ว! รอคนอื่นทายต่อ'
         : 'ถามคำถามเพื่อทายคำบนหัวคุณ (พูดคุยกันนอกเกม) ห้ามมองคำของตัวเอง!';
     }
+    if (s.endReason === 'timeout') return 'หมดเวลา! เฉลยคำของทุกคนแล้ว';
+    if (s.endReason === 'all-done') return 'ทุกคนทายถูกแล้ว! ดูคำของทุกคนด้านล่าง';
     return 'เฉลยแล้ว! ดูคำของทุกคนด้านล่าง';
+  }
+
+  function formatTime(ms) {
+    const total = Math.ceil(Math.max(0, ms) / 1000);
+    const m = Math.floor(total / 60);
+    const sec = String(total % 60).padStart(2, '0');
+    return `${m}:${sec}`;
+  }
+
+  function tick() {
+    const t = $('timer');
+    if (!state || state.phase !== 'playing' || deadline == null) return;
+    const left = deadline - performance.now();
+    t.textContent = `⏱ ${formatTime(left)}`;
+    t.classList.toggle('low', left <= 30000);
   }
 
   function el(tag, cls, text) {
@@ -129,6 +148,29 @@
     const isHost = s.you === s.hostId;
 
     $('room-code').textContent = s.code;
+
+    // ตัวจับเวลา: ตอนเล่น = นับถอยหลัง, ตอนล็อบบี้ = แสดงเวลาที่ตั้งไว้
+    const timer = $('timer');
+    const picker = $('time-picker');
+    picker.hidden = !(isHost && s.phase === 'lobby');
+    timer.hidden = s.phase === 'revealed';
+    timer.classList.remove('low');
+    if (s.phase === 'lobby') {
+      timer.classList.add('small');
+      timer.textContent = `⏱ เวลาต่อรอบ ${s.timeLimit} นาที`;
+      timer.hidden = isHost; // หัวห้องเห็นปุ่มเลือกอยู่แล้ว
+    } else if (s.phase === 'playing') {
+      timer.classList.remove('small');
+      tick();
+    }
+    const seg = $('time-seg');
+    seg.textContent = '';
+    for (const minutes of s.timeOptions) {
+      const b = el('button', '', `${minutes} นาที`);
+      b.setAttribute('aria-pressed', String(minutes === s.timeLimit));
+      b.addEventListener('click', () => send({ t: 'time', minutes }));
+      seg.append(b);
+    }
     $('status').textContent = statusText(s);
 
     const list = $('players');
@@ -252,4 +294,5 @@
 
   render();
   connect();
+  setInterval(tick, 250);
 })();
