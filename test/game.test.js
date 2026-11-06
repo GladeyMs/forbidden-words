@@ -306,3 +306,97 @@ test('ทุกคนทายถูกก่อนหมดเวลา: เฉ
   assert.strictEqual(end.endReason, 'all-done');
   await closeAll(game, host, bob, cara);
 });
+
+const me = (s) => s.players.find((p) => p.id === s.you);
+const byName = (s, n) => s.players.find((p) => p.name === n);
+
+test('คะแนนตามลำดับที่ทายถูก สะสมข้ามรอบ คนที่ไม่ทันได้ 0', async () => {
+  const { game, host, bob, cara } = await setup3({ msPerMinute: 60 });
+  host.send({ t: 'time', minutes: 3 }); // 180ms
+  host.send({ t: 'start' });
+  const s0 = await host.wait((m) => m.t === 'state' && m.phase === 'playing');
+  assert.strictEqual(s0.round, 1);
+  assert.ok(s0.players.every((p) => p.score === 0 && p.roundPoints === 0));
+
+  bob.send({ t: 'done' });
+  await bob.wait((m) => m.t === 'state' && me(m).done);
+  bob.send({ t: 'done' }); // กดซ้ำต้องไม่ได้คะแนนเพิ่ม
+  cara.send({ t: 'done' });
+  await cara.wait((m) => m.t === 'state' && me(m).done);
+  // Alice ไม่ทัน -> หมดเวลา (all-done ไม่เกิดเพราะ Alice ยังไม่ทาย)
+  const end = await host.wait((m) => m.t === 'state' && m.phase === 'revealed');
+  assert.strictEqual(end.endReason, 'timeout');
+  assert.strictEqual(byName(end, 'Bob').score, 3);
+  assert.strictEqual(byName(end, 'Bob').roundPoints, 3);
+  assert.strictEqual(byName(end, 'Cara').score, 2);
+  assert.strictEqual(byName(end, 'Alice').score, 0);
+  assert.strictEqual(byName(end, 'Alice').roundPoints, 0);
+
+  // รอบ 2: Alice มาก่อน คะแนนสะสม
+  host.send({ t: 'again' });
+  await host.waitNew((m) => m.t === 'state' && m.phase === 'lobby');
+  assert.strictEqual(byName(host.last('state'), 'Bob').score, 3, 'กลับล็อบบี้คะแนนต้องไม่หาย');
+  assert.ok(host.last('state').players.every((p) => p.roundPoints === 0));
+  host.send({ t: 'start' });
+  await host.waitNew((m) => m.t === 'state' && m.phase === 'playing' && m.round === 2);
+  host.send({ t: 'done' });
+  await host.wait((m) => m.t === 'state' && m.round === 2 && me(m).done);
+  host.send({ t: 'reveal' });
+  const r2 = await host.waitNew((m) => m.t === 'state' && m.phase === 'revealed');
+  assert.strictEqual(byName(r2, 'Alice').score, 3);
+  assert.strictEqual(byName(r2, 'Alice').roundPoints, 3);
+  assert.strictEqual(byName(r2, 'Bob').score, 3);
+  assert.strictEqual(byName(r2, 'Bob').roundPoints, 0, 'รอบนี้ Bob ไม่ได้ทาย');
+  await closeAll(game, host, bob, cara);
+});
+
+test('ทายถูกครบทุกคน: 3 คนได้ 3/2/1 ตามลำดับ', async () => {
+  const { game, host, bob, cara } = await setup3();
+  host.send({ t: 'start' });
+  await host.wait((m) => m.phase === 'playing');
+  for (const c of [cara, host, bob]) {
+    c.send({ t: 'done' });
+    await c.wait((m) => m.t === 'state' && me(m).done);
+  }
+  const end = await host.wait((m) => m.t === 'state' && m.phase === 'revealed');
+  assert.strictEqual(byName(end, 'Cara').score, 3);
+  assert.strictEqual(byName(end, 'Alice').score, 2);
+  assert.strictEqual(byName(end, 'Bob').score, 1);
+  await closeAll(game, host, bob, cara);
+});
+
+test('รีเซ็ตคะแนน: เฉพาะหัวห้องและเฉพาะตอนล็อบบี้ / ยกเลิกรอบกลางคันคืนคะแนน', async () => {
+  const { game, host, bob, cara } = await setup3();
+  host.send({ t: 'start' });
+  await host.wait((m) => m.phase === 'playing');
+  bob.send({ t: 'done' });
+  await bob.wait((m) => m.t === 'state' && me(m).done && me(m).score === 3);
+
+  host.send({ t: 'resetscores' });
+  assert.match((await host.waitNew((m) => m.t === 'error')).msg, /ก่อนเริ่มเกม/);
+
+  // ยกเลิกรอบกลางคัน (again ระหว่างเล่น) ต้องคืนคะแนนของรอบนั้น
+  host.send({ t: 'again' });
+  const lobby = await host.waitNew((m) => m.t === 'state' && m.phase === 'lobby');
+  assert.strictEqual(byName(lobby, 'Bob').score, 0, 'รอบที่ไม่จบต้องไม่เก็บคะแนน');
+
+  // เล่นจริงให้ Bob ได้คะแนน แล้วลองรีเซ็ต
+  host.send({ t: 'start' });
+  await host.waitNew((m) => m.t === 'state' && m.phase === 'playing');
+  bob.send({ t: 'done' });
+  await bob.waitNew((m) => m.t === 'state' && me(m).score === 3);
+  host.send({ t: 'reveal' });
+  await host.waitNew((m) => m.t === 'state' && m.phase === 'revealed');
+  host.send({ t: 'again' });
+  await host.waitNew((m) => m.t === 'state' && m.phase === 'lobby');
+  assert.strictEqual(byName(host.last('state'), 'Bob').score, 3);
+
+  bob.send({ t: 'resetscores' });
+  assert.match((await bob.waitNew((m) => m.t === 'error')).msg, /หัวห้อง/);
+  assert.strictEqual(byName(host.last('state'), 'Bob').score, 3, 'คนอื่นรีเซ็ตไม่ได้');
+
+  host.send({ t: 'resetscores' });
+  const reset = await cara.waitNew((m) => m.t === 'state' && m.players.every((p) => p.score === 0));
+  assert.strictEqual(reset.round, 0);
+  await closeAll(game, host, bob, cara);
+});

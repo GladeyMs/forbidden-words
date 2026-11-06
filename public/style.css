@@ -86,6 +86,17 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .player .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .player .name { font-weight: 700; overflow-wrap: anywhere; }
 .tag { font-size: .78rem; color: var(--muted); }
+.right { display: flex; align-items: center; gap: 8px; }
+.score { font-weight: 800; white-space: nowrap; }
+.gain { font-weight: 700; color: var(--good); }
+.scoreboard { margin-top: 20px; padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+.scoreboard h2 { margin: 0 0 8px; font-size: 1.05rem; }
+.scoreboard ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.scoreboard li { display: flex; align-items: center; gap: 10px; }
+.scoreboard .rank { width: 2ch; text-align: center; font-weight: 800; color: var(--muted); }
+.scoreboard li.first .rank { color: var(--accent); }
+.scoreboard .nm { flex: 1; overflow-wrap: anywhere; }
+.scoreboard .pts { font-weight: 800; font-variant-numeric: tabular-nums; }
 .word {
   margin-top: 8px;
   padding: 10px;

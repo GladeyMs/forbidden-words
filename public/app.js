@@ -127,6 +127,28 @@
     t.classList.toggle('low', left <= 30000);
   }
 
+  // ตารางคะแนนเรียงจากมากไปน้อย คะแนนเท่ากันได้อันดับเดียวกัน
+  function renderScoreboard(s) {
+    const box = $('scoreboard');
+    box.hidden = !(s.round > 0 && s.phase !== 'playing');
+    if (box.hidden) return;
+    $('round-no').textContent = `· เล่นไปแล้ว ${s.round} รอบ`;
+    const list = $('score-list');
+    list.textContent = '';
+    const sorted = s.players.slice().sort((a, b) => b.score - a.score);
+    let rank = 0;
+    let prev = null;
+    sorted.forEach((p, i) => {
+      if (p.score !== prev) rank = i + 1;
+      prev = p.score;
+      const li = el('li', rank === 1 && p.score > 0 ? 'first' : '');
+      li.append(el('span', 'rank', String(rank)));
+      li.append(el('span', 'nm', p.id === s.you ? `${p.name} (คุณ)` : p.name));
+      li.append(el('span', 'pts', String(p.score)));
+      list.append(li);
+    });
+  }
+
   function el(tag, cls, text) {
     const e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -186,11 +208,17 @@
       if (!p.connected) tags.push('หลุดการเชื่อมต่อ');
       if (tags.length) left.append(el('div', 'tag', tags.join(' · ')));
       top.append(left);
+      const right = el('div', 'right');
+      if (s.round > 0) {
+        if (s.phase !== 'lobby' && p.roundPoints > 0) right.append(el('span', 'gain', `+${p.roundPoints}`));
+        right.append(el('span', 'score', `⭐ ${p.score}`));
+      }
       if (isHost && p.id !== s.you && s.phase === 'lobby') {
-        top.append(button('เชิญออก', () => {
+        right.append(button('เชิญออก', () => {
           if (confirm(`เชิญ ${p.name} ออกจากห้อง?`)) send({ t: 'kick', id: p.id });
         }, 'danger'));
       }
+      top.append(right);
       li.append(top);
 
       if (s.phase !== 'lobby') {
@@ -200,6 +228,8 @@
       list.append(li);
     }
 
+    renderScoreboard(s);
+
     const actions = $('me-actions');
     actions.textContent = '';
     const me = s.players.find((p) => p.id === s.you);
@@ -207,6 +237,11 @@
       const b = button('เริ่มเกม', () => send({ t: 'start' }), 'primary');
       b.disabled = s.players.length < s.minPlayers;
       actions.append(b);
+      if (s.round > 0) {
+        actions.append(button('รีเซ็ตคะแนน', () => {
+          if (confirm('ล้างคะแนนของทุกคนและเริ่มนับใหม่?')) send({ t: 'resetscores' });
+        }));
+      }
     }
     if (s.phase === 'playing') {
       if (!me.done) {

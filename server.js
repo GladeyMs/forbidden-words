@@ -85,6 +85,7 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
       you: me.id,
       maxPlayers: MAX_PLAYERS,
       minPlayers: MIN_PLAYERS,
+      round: room.round,
       timeLimit: room.timeLimit,
       timeOptions: TIME_OPTIONS,
       // เวลาที่เหลือคิดจากนาฬิกาเซิร์ฟเวอร์ ส่งเป็นมิลลิวินาทีที่เหลือ (ไม่พึ่งนาฬิกาเครื่องผู้เล่น)
@@ -97,7 +98,15 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
         if (room.phase !== 'lobby') {
           word = p.id === me.id && !p.done && !revealed ? null : p.word;
         }
-        return { id: p.id, name: p.name, connected: p.connected, done: p.done, word };
+        return {
+          id: p.id,
+          name: p.name,
+          connected: p.connected,
+          done: p.done,
+          word,
+          score: p.score,
+          roundPoints: p.done ? p.roundPoints : 0,
+        };
       }),
     };
   }
@@ -199,6 +208,8 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
       connected: false,
       word: null,
       done: false,
+      score: 0,
+      roundPoints: 0,
     };
   }
 
@@ -212,6 +223,9 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
       hostId: null,
       players: [],
       custom: [],
+      round: 0,
+      finishCount: 0,
+      roundSize: 0,
       timeLimit: DEFAULT_TIME,
       endsAt: null,
       endReason: null,
@@ -263,7 +277,11 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
     room.players.forEach((p, i) => {
       p.word = picked[i];
       p.done = false;
+      p.roundPoints = 0;
     });
+    room.round += 1;
+    room.finishCount = 0;
+    room.roundSize = room.players.length;
     room.phase = 'playing';
     room.endReason = null;
     startRoundTimer(room);
@@ -273,6 +291,10 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
   function handleDone(room, player) {
     if (room.phase !== 'playing' || player.done) return;
     player.done = true;
+    // คะแนนตามลำดับที่ทายถูก: คนแรกได้เท่าจำนวนผู้เล่นตอนเริ่มรอบ ลดลงทีละ 1 ต่ำสุด 1
+    room.finishCount += 1;
+    player.roundPoints = Math.max(1, room.roundSize - room.finishCount + 1);
+    player.score += player.roundPoints;
     maybeAutoReveal(room);
     broadcast(room);
   }
@@ -287,6 +309,8 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
   function handleAgain(room, player) {
     if (player.id !== room.hostId) return fail(player.ws, 'เฉพาะหัวห้องเท่านั้น');
     if (room.phase === 'lobby') return;
+    // ยกเลิกรอบกลางคัน: คืนคะแนนของรอบที่ไม่จบ
+    if (room.phase === 'playing') room.players.forEach((p) => { p.score -= p.roundPoints; });
     clearTimeout(room.roundTimer);
     room.roundTimer = null;
     room.endsAt = null;
@@ -295,7 +319,19 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
     room.players.forEach((p) => {
       p.word = null;
       p.done = false;
+      p.roundPoints = 0;
     });
+    broadcast(room);
+  }
+
+  function handleResetScores(room, player) {
+    if (player.id !== room.hostId) return fail(player.ws, 'เฉพาะหัวห้องเท่านั้น');
+    if (room.phase !== 'lobby') return fail(player.ws, 'รีเซ็ตคะแนนได้เฉพาะก่อนเริ่มเกม');
+    room.players.forEach((p) => {
+      p.score = 0;
+      p.roundPoints = 0;
+    });
+    room.round = 0;
     broadcast(room);
   }
 
@@ -364,6 +400,7 @@ function createGameServer({ msPerMinute = 60 * 1000 } = {}) {
         case 'again': return handleAgain(room, player);
         case 'words': return handleWords(room, player, msg);
         case 'time': return handleTime(room, player, msg);
+        case 'resetscores': return handleResetScores(room, player);
         case 'kick': return handleKick(room, player, msg);
         case 'leave': return handleLeave(ws, room, player);
         default: return undefined;
