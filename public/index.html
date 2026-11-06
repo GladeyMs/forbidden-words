@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>คำต้องห้าม</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <h1>🤫 คำต้องห้าม</h1>
+    <p class="sub">เห็นคำบนหัวคนอื่น แต่ไม่เห็นคำของตัวเอง ถามตอบเพื่อทายให้ได้!</p>
+
+    <section id="home" hidden>
+      <label for="name">ชื่อของคุณ</label>
+      <input id="name" maxlength="20" autocomplete="nickname" placeholder="เช่น มะนาว">
+      <button id="btn-create" class="primary">สร้างห้องใหม่ (เป็นหัวห้อง)</button>
+      <div class="or">หรือเข้าห้องเพื่อน</div>
+      <div class="row">
+        <input id="code" maxlength="4" autocapitalize="characters" placeholder="รหัสห้อง 4 ตัว">
+        <button id="btn-join">เข้าห้อง</button>
+      </div>
+    </section>
+
+    <section id="room" hidden>
+      <div class="bar">
+        <div>
+          <div class="muted">รหัสห้อง</div>
+          <div id="room-code" class="code"></div>
+        </div>
+        <button id="btn-share">แชร์ลิงก์</button>
+      </div>
+      <div id="status" class="status"></div>
+
+      <ul id="players" class="players"></ul>
+
+      <div id="me-actions" class="actions"></div>
+
+      <details id="custom-box" hidden>
+        <summary>คำที่ตั้งเอง (ไม่บังคับ)</summary>
+        <p class="muted">ใส่ทีละบรรทัด ถ้ามีไม่น้อยกว่าจำนวนผู้เล่นจะใช้เฉพาะคำของคุณ ถ้าน้อยกว่าจะผสมกับคำของระบบ</p>
+        <textarea id="custom" rows="5" maxlength="4000"></textarea>
+        <button id="btn-save-words">บันทึกคำ</button>
+      </details>
+
+      <button id="btn-leave" class="link">ออกจากห้อง</button>
+    </section>
+  </main>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>
